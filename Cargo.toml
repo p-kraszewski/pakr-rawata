@@ -2,12 +2,13 @@
 name = "pakr-rawata"
 version = "1.0.0"
 authors = ["Pawel Kraszewski <pawel@kraszewscy.net>"]
+description = "Raw access to hard disks - read using READ_DMA_EXT (0x25), write using WRITE_DMA_EXT (0x35) and identify using IDENTIFY_DEVICE (0xEC). On Linux uses SG subsystem, on FreeBSD uses CAM subsystem. Warning, it bypasses all OS security checks and all software caches. You can kill data on your HDD in a blink of an eye."
 edition = "2018"
 build = "build.rs"
 license = "BSD-2-Clause"
-keywords = ["linux", "signals", "sigset_t"]
-categories = ["api-bindings", "os::linux-apis"]
-repository = "https://github.com/p-kraszewski/pakr-signals"
+keywords = ["linux","freebsd", "ata", "raw"]
+categories = ["api-bindings", "os::linux-apis","os::freebsd-apis"]
+repository = "https://github.com/p-kraszewski/pakr-rawata"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

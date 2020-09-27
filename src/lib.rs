@@ -1,4 +1,49 @@
-#![allow(dead_code)]
+//! Raw access to hard disks for Linux and FreeBSD. For technical information refer
+//! to [ATA/ATAPI Command Set](http://t13.org/Documents/UploadedDocuments/docs2017/di529r18-ATAATAPI_Command_Set_-_4.pdf)
+//! guide.
+//!
+//! # Warning
+//!
+//! **it bypasses all OS security checks and all software caches. You can kill the data on
+//! your HDD in a blink of an eye. The _only_ protection is that it requires administrative
+//! privilege to run.**
+//!
+//! # Supported operations
+//!
+//! - read sectors using `READ_DMA_EXT` (ATA cmd 0x25, documentation chapter 7.21),
+//! - write sectors using `WRITE_DMA_EXT` (ATA cmd 0x35, documentation chapter 7.57)
+//! - identify drive using `IDENTIFY_DEVICE` (ATA cmd 0xEC, documentation chapter 7.13, including a
+//!   detailed description of returned structure).
+//!
+//! On Linux uses `SG` subsystem, on FreeBSD uses `CAM` subsystem.
+//!
+//! # Note
+//!
+//! *In theory*, a single ATA DMA transfer is limited to 65536 sectors (32MiB for 512B sectors).
+//! Sector count is 16 bit and a full 65536 sector transfer is indicated by a sector count of
+//! 0x0000).
+//!
+//! *In practice* operating system enforces much lower limit, in the range of a few hundred
+//! kilobytes.
+//!
+//! On FreeBSD I managed to achieve stable transfers of 8MB at a time by re-compiling
+//! kernel with custom configuration:
+//! ```text
+//! include GENERIC
+//!
+//! ident           BIGDMA
+//!
+//! options         DFLTPHYS=(16U*1024*1024)
+//! options         MAXPHYS=(32U*1024*1024)
+//! ```
+//!
+//! On Linux I didn't find any accessible tunable to bump-up the maximal DMA transfer size,
+//! neither compile-time nor run-time.
+//!
+//! # TODO
+//! - support sector sizes different than 512 bytes
+//!
+
 #![allow(clippy::identity_op)]
 
 use std::fmt;
@@ -24,110 +69,72 @@ where
     fn raw_info(&mut self, ident: *mut IdentifyDeviceData) -> io::Result<()>;
 }
 
+/// ATA standard IDENTIFY_DEVICE structure.
+///
+/// It is described in the table 55 of [ATA/ATAPI Command Set](http://t13.org/Documents/UploadedDocuments/docs2017/di529r18-ATAATAPI_Command_Set_-_4.pdf).
+///
+/// Due to a 16-bit bus architecture of ATA, that structure contains 256 16-bit words, not 512
+/// bytes. Side effect of this layout is that all strings have pairwise swapped letters. String
+/// "Abcdef" is stored in memory as "bAdcfe",
+///
+/// Numeric values are stored as LE-LE, that is bytes within word are little-endian and for
+/// multi-word values words themselves are also little-endian. This is demonstrated in
+/// [`IdentifyDeviceData::get_sector_count`].
 #[derive(Copy, Clone)]
-#[repr(C, packed)]
-pub struct IdentifyDeviceData {
-    general_configuration: u16,
-    number_of_cylinders: u16,
-    reserved1: u16,
-    number_of_heads: u16,
-    unformatted_bytes_per_track: u16,
-    unformatted_bytes_per_sector: u16,
-    sectors_per_track: u16,
-    vendor_unique1: [u16; 3],
-    serial_number: [u8; 20],
-    buffer_type: u16,
-    buffer_sector_size: u16,
-    number_of_ecc_bytes: u16,
-    firmware_revision: [u8; 8],
-    model_number: [u8; 40],
-    maximum_block_transfer: u8,
-    vendor_unique2: u8,
-    double_word_io: u16,
-    capabilities: u16,
-    reserved2: u16,
-    vendor_unique3: u8,
-    pio_cycle_timing_mode: u8,
-    vendor_unique4: u8,
-    dma_cycle_timing_mode: u8,
-    translation_fields_valid: u16,
-    number_of_current_cylinders: u16,
-    number_of_current_heads: u16,
-    current_sectors_per_track: u16,
-    current_sector_capacity: u32,
-    current_multi_sector_setting: u16,
-    user_addressable_sectors: u32,
-    single_word_dmasupport: u8,
-    single_word_dmaactive: u8,
-    multi_word_dmasupport: u8,
-    multi_word_dmaactive: u8,
-    advanced_piomodes: u8,
-    reserved4: u8,
-    minimum_mwxfer_cycle_time: u16,
-    recommended_mwxfer_cycle_time: u16,
-    minimum_piocycle_time: u16,
-    minimum_piocycle_time_iordy: u16,
-    reserved5: [u16; 2],
-    release_time_overlapped: u16,
-    release_time_service_command: u16,
-    major_revision: u16,
-    minor_revision: u16,
-    max_queue_depth: u16,
-    sata_capability: u16,
-    reserved6: [u16; 9],
-    command_support: u16,
-    command_enable: u16,
-    utral_dma_mode: u16,
-    reserved7: [u16; 11],
-    lba48bit: [u16; 4],
-    reserved8: [u16; 23],
-    special_functions_enabled: u16,
-    reserved9: [u16; 128], // 128-255
-}
+pub struct IdentifyDeviceData([u16; 256]);
 
 impl IdentifyDeviceData {
-    pub fn get_size(&self) -> u64 {
-        u64::from(self.lba48bit[0]) << 0
-            | u64::from(self.lba48bit[1]) << 16
-            | u64::from(self.lba48bit[2]) << 32
-            | u64::from(self.lba48bit[3]) << 48
+    /// Return total sector count of disk
+    pub fn get_sector_count(&self) -> u64 {
+        let ptr = self.0[100..=103].as_ptr() as *const u64;
+
+        // Always safe, source is always 4*u16 long
+        let len = unsafe { *ptr };
+
+        // Convert for non-LE hosts, no-op for LE-hosts
+        u64::from_le(len)
     }
 
+    /// Return model info of disk
     pub fn get_model(&self) -> String {
-        Self::swap_string(&self.model_number)
+        Self::swap_string(&self.0[27..=46])
     }
 
+    /// Return serial number of disk
     pub fn get_serial(&self) -> String {
-        Self::swap_string(&self.serial_number)
+        Self::swap_string(&self.0[10..=19])
     }
 
+    /// Return firmware revision of disk
     pub fn get_firmware(&self) -> String {
-        Self::swap_string(&self.firmware_revision)
+        Self::swap_string(&self.0[23..=26])
     }
 
+    /// Read range fixing byte order (bytes are always pairwise swapped, regardless of host being
+    /// LE or BE)
     #[inline]
-    fn swap_bytes(buffer: &[u8]) -> Vec<u8> {
-        assert_eq!(buffer.len() % 2, 0);
+    fn swap_bytes(buffer: &[u16]) -> Vec<u8> {
+        let mut ans = Vec::with_capacity(buffer.len() * 2);
 
-        let mut ans = Vec::with_capacity(buffer.len());
-
-        for pair in buffer.chunks(2) {
-            ans.push(pair[1]);
-            ans.push(pair[0]);
+        for word in buffer {
+            ans.push(((word >> 8) & 0xFF) as u8);
+            ans.push((word & 0xFF) as u8);
         }
         ans
     }
 
+    /// Convert un-swapped range into string assuming it is utf8-ish.
     #[inline]
-    fn swap_string(buffer: &[u8]) -> String {
+    fn swap_string(buffer: &[u16]) -> String {
         let swapped = Self::swap_bytes(buffer);
         String::from(String::from_utf8_lossy(swapped.as_slice()).trim())
     }
 }
 
 impl fmt::Debug for IdentifyDeviceData {
+    /// Return basic drive information
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let size = self.get_size();
+        let size = self.get_sector_count();
         let model = self.get_model();
         let serial = self.get_serial();
         let firmware = self.get_firmware();
@@ -141,9 +148,15 @@ impl fmt::Debug for IdentifyDeviceData {
     }
 }
 
+/// Attached ATA device
 pub struct Device(os::ATA);
 
 impl Device {
+    /// Open device pointed by a specific path.
+    ///
+    /// **DO NOT** use _partition_ references here (like `/dev/sda1` on Linux or `/dev/ada0p1` on
+    /// FreeBSD). Use **only** _raw disk_ references, like  `/dev/sda` on Linux or `/dev/ada0` on
+    /// FreeBSD.
     #[inline]
     pub fn open<P>(dev: P) -> io::Result<Self>
     where
@@ -152,21 +165,31 @@ impl Device {
         Ok(Device(os::ATA::open(dev)?))
     }
 
+    /// Close opened device
     #[inline]
     pub fn close(&mut self) {
         self.0.close();
     }
 
+    /// Read sector(s) from disk.
+    ///
+    /// Buffer size **must** be multiple of sector size. **It bypasses all protections and
+    /// caches/buffers.**
     #[inline]
     pub fn read(&mut self, sector: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.0.raw_read(sector, buffer)
     }
 
+    /// Write sector(s) to disk.
+    ///
+    /// Buffer size **must** be multiple of sector size. **It bypasses all protections and
+    /// caches/buffers.**
     #[inline]
     pub fn write(&mut self, sector: u64, buffer: &[u8]) -> io::Result<()> {
         self.0.raw_write(sector, buffer)
     }
 
+    /// Get identification record from disk.
     #[inline]
     pub fn info(&mut self) -> io::Result<IdentifyDeviceData> {
         let mut u_ident = MaybeUninit::<IdentifyDeviceData>::uninit();
