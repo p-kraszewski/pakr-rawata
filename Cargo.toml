@@ -1,0 +1,18 @@
+[package]
+name = "pakr-rawata"
+version = "1.0.0"
+authors = ["Pawel Kraszewski <pawel@kraszewscy.net>"]
+edition = "2018"
+build = "build.rs"
+license = "BSD-2-Clause"
+keywords = ["linux", "signals", "sigset_t"]
+categories = ["api-bindings", "os::linux-apis"]
+repository = "https://github.com/p-kraszewski/pakr-signals"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "^0.2"
+
+[build-dependencies]
+bindgen = "^0"

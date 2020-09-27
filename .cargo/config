@@ -1,0 +1,5 @@
+[target.'cfg(target_os = "linux")']
+runner = 'sudo -E'
+
+[target.'cfg(target_os = "freebsd")']
+runner = 'sudo -E'
